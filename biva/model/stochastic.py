@@ -1,8 +1,12 @@
 from typing import *
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import nn, Tensor
-from torch.distributions import Normal
+from torch.distributions import Normal, Dirichlet
+
+
+import torch.functional as F
 
 from ..layers import PaddedNormedConv, NormedDense
 from ..utils import batch_reduce
@@ -233,3 +237,155 @@ class ConvNormal(StochasticLayer):
         kl = batch_reduce(kl)
 
         return {'kl': [kl]}
+
+
+class DenseDirichlet(StochasticLayer):
+    def __init__(self,data: Dict, tensor_shp: Tuple[int], top: bool = False, act: nn.Module = nn.ELU,
+                 learn_prior: bool = False, weightnorm: bool = True, log_var_act: Optional[Callable] = nn.Softplus,
+                 **kwargs):
+        
+        super().__init__(data, tensor_shp)
+
+        """
+        A Dirichlet stochastic layer parametrized by a dense layer.
+        """
+
+        self.eps = 1e-8
+        nhid = tensor_shp[1]
+        self.nz = data.get('N')
+        self.tensor_shp = tensor_shp
+        self.input_shp = tensor_shp
+        self.act = act()
+        self.log_var_act = log_var_act() if log_var_act is not None else None
+
+        # stochastic layer and prior
+        if top:
+            prior = torch.full((self.nz), 0.5) # sparse prior
+            self.register_buffer('prior', prior)
+
+        # computes logits
+        nz_in = self.nz
+        self.qx2z = NormedDense(tensor_shp, nz_in, weightnorm=weightnorm)
+        if not top:
+            self.px2z = NormedDense(tensor_shp, nz_in, weightnorm=weightnorm)
+
+        self._output_shape = (-1, self.nz)
+
+    @property
+    def output_shape(self):
+        return self._output_shape
+    
+    @property
+    def input_shape(self):
+        return self._input_shape
+
+    def expand_prior(self, batch_size: int):
+        return self.prior.expand(batch_size, *self.prior.shape)
+    
+    def concentration_from_logits(self, logits: Tensor) -> Tensor:
+        return F.relu(logits) + self.eps
+
+    def forward(self, x: Optional[Tensor], inference: bool, sample: bool = True, N: Optional[int] = None, **kwargs) -> \
+            Tuple[Tensor, Dict[str, Any]]:
+
+        if x is None:
+            alpha = self.prior.expand(N, *self.prior.shape)
+        else:
+            if inference:
+                logits = self.qx2z(self.act(x))
+                alpha = self.concentration_from_logits(logits)
+            else:
+                logits = self.px2z(self.act(x))
+                alpha = self.concentration_from_logits(logits)
+
+        # sample layer
+        dist = Dirichlet(alpha)
+        z = dist.rsample() if sample else None
+
+        return z, {'z': z, 'dist': dist}
+
+    def loss(self, q_data: Dict[str, Any], p_data: Dict[str, Any], **kwargs: Any) -> Dict[str, List]:
+        z_q = q_data.get('z')
+        q = q_data.get('dist')
+        p = p_data.get('dist')
+
+        kl = q.log_prob(z_q) - p.log_prob(z_q)
+        kl = batch_reduce(kl)
+
+        return {'kl': [kl]}
+    
+
+class ConvDirichlet(StochasticLayer):
+    """
+    A Normal stochastic layer parametrized by convolutions.
+    """
+
+    def __init__(self, data: Dict, tensor_shp: Tuple[int], top: bool = False, act: nn.Module = nn.ELU,
+                 learn_prior: bool = False, weightnorm: bool = True, log_var_act: Optional[Callable] = nn.Softplus,
+                 **kwargs):
+        super().__init__(data, tensor_shp)
+
+        self.eps = 1e-8
+        nhid = tensor_shp[1]
+        self.nz = data.get('N')
+        kernel_size = data.get('kernel')
+        self.tensor_shp = tensor_shp
+        self.input_shp = tensor_shp
+        self.act = act()
+        self.log_var_act = log_var_act() if log_var_act is not None else None
+
+        # prior
+        if top:
+            prior = torch.full((self.nz, *tensor_shp[2:]), 0.5) # sparse prior
+
+            if learn_prior:
+                self.prior = nn.Parameter(prior)
+            else:
+                self.register_buffer('prior', prior)
+
+        # computes logits
+        nz_in = self.nz
+        self.qx2z = PaddedNormedConv(tensor_shp, nn.Conv2d(nhid, nz_in, kernel_size), weightnorm=weightnorm)
+        if not top:
+            self.px2z = PaddedNormedConv(tensor_shp, nn.Conv2d(nhid, nz_in, kernel_size), weightnorm=weightnorm)
+
+        # compute output shape
+        nz_out = self.nz
+        out_shp = (-1, nz_out, *tensor_shp[2:])
+        self._output_shape = out_shp
+        self._input_shape = tensor_shp        
+
+    @property
+    def output_shape(self):
+        return self._output_shape
+    
+    @property
+    def input_shape(self):
+        return self._input_shape
+    
+    def expand_prior(self, batch_size: int):
+        return self.prior.expand(batch_size, *self.prior.shape)
+    
+    def concentration_from_logits(self, logits: Tensor) -> Tensor:
+        return F.relu(logits) + self.eps
+    
+    def forward(self, x: Optional[Tensor], inference: bool, sample: bool = True, N: Optional[int] = None, **kwargs) -> \
+            Tuple[
+                Tensor, Dict[str, Any]]:
+
+        if x is None:
+            mu, logvar = self.expand_prior(N)
+
+        else:
+            if inference:
+                logits = self.qx2z(self.act(x))
+                alpha = self.concentration_from_logits(logits)
+            else:
+                logits = self.px2z(self.act(x))
+                alpha = self.concentration_from_logits(logits)
+
+        # sample layer
+        dist = Normal(alpha)
+        z = dist.rsample() if sample else None
+
+        return z, {'z': z, 'dist': dist}

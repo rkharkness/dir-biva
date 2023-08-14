@@ -1,5 +1,13 @@
 from .stochastic import DenseNormal, ConvNormal
 
+def get_deep_vae_mood(): # base on ladder vae project
+    """
+    Get Deep VAE configuration for mood dataset.
+    """
+
+    raise NotImplementedError
+    
+
 
 def get_deep_vae_mnist():
     """

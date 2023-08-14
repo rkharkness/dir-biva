@@ -102,7 +102,7 @@ class DeepVae(nn.Module):
             stages, _ = get_deep_vae_mnist()
 
         if latents is None:
-            _, latens = get_deep_vae_mnist()
+            _, latents = get_deep_vae_mnist()
 
         return stages, latents
 
