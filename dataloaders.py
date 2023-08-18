@@ -35,6 +35,6 @@ def get_dataloaders(data, path, bs = 64, num_workers = 4):
     
     else:
         batch = next(iter(train_loader))
-        tensor_shp = (-1, batch[0].shape)
+        tensor_shp = (-1, *batch[0].shape)
     
     return train_loader, valid_loader, test_loader, tensor_shp
