@@ -7,12 +7,14 @@ import pickle
 
 import numpy as np
 import torch
+
 from biva.dataloaders import get_dataloaders
 
 from biva.evaluation import VariationalInference
 from biva.model import DeepVae, get_deep_vae_mnist, get_deep_vae_cifar, get_deep_vae_brain, get_deep_vae_abdom, VaeStage, LvaeStage, BivaStage
 from biva.utils import LowerBoundedExponentialLR, training_step, test_step, summary2logger, save_model, load_model, \
     sample_model, DiscretizedMixtureLogits
+from biva.train import train
 from booster import Aggregator
 from booster.utils import EMA, logging_sep, available_device
 from torch.distributions import Bernoulli
@@ -20,10 +22,10 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root', default='runs/', help='directory to store training logs')
-parser.add_argument('--likelihood', action='store_false', help='approx. elbo through reconstruction')
+parser.add_argument('--root', default='./runs/', help='directory to store training logs')
+parser.add_argument('--likelihood', default=None, help='directory to store training logs')
 parser.add_argument('--data_root', default='data/', help='directory to store the dataset')
-parser.add_argument('--dataset', default='binmnist', help='binmnist')
+parser.add_argument('--dataset', default='mood', help='mood')
 parser.add_argument('--model_type', default='biva', help='model type (vae | lvae | biva)')
 parser.add_argument('--device', default='auto', help='auto, cuda, cpu')
 parser.add_argument('--num_workers', default=1, type=int, help='number of workers')
@@ -38,7 +40,7 @@ parser.add_argument('--q_dropout', default=0.5, type=float, help='inference mode
 parser.add_argument('--p_dropout', default=0.5, type=float, help='generative model dropout')
 parser.add_argument('--iw_samples', default=1000, type=int, help='number of importance weighted samples for testing')
 parser.add_argument('--id', default='', type=str, help='run id suffix')
-parser.add_argument('--no_skip', action='store_true', help='do not use skip connections')
+parser.add_argument('--no_skip', action='store_false', help='do not use skip connections')
 parser.add_argument('--log_var_act', default='softplus', type=str, help='activation for the log variance')
 parser.add_argument('--beta', default=1.0, type=float, help='Beta parameter (Beta-VAE)')
 
@@ -52,8 +54,6 @@ if len(args.id):
     run_id += f"-{args.id}"
 if args.beta != 1:
     run_id += f"-{args.beta}"
-if args.likelihood == False:
-    run_id += 'reconstruction_elbo'
 logdir = os.path.join(args.root, run_id)
 if not os.path.exists(logdir):
     os.makedirs(logdir)
@@ -103,6 +103,7 @@ else:
 
 Stage = {'vae': VaeStage, 'lvae': LvaeStage, 'biva': BivaStage}[args.model_type]
 log_var_act = {'none': None, 'softplus': torch.nn.Softplus, 'tanh': torch.nn.Tanh}[args.log_var_act]
+
 hyperparameters = {
     'Stage': Stage,
     'tensor_shp': tensor_shp,
@@ -114,8 +115,10 @@ hyperparameters = {
     'type': args.model_type,
     'features_out': features_out,
     'no_skip': args.no_skip,
-    'log_var_act': log_var_act
-}
+    'log_var_act': log_var_act}
+
+
+print(hyperparameters)
 # save hyper parameters for easy loading
 pickle.dump(hyperparameters, open(os.path.join(logdir, "hyperparameters.p"), "wb"))
 
@@ -156,7 +159,6 @@ scheduler = LowerBoundedExponentialLR(optimizer, 0.999999, 0.0001)
 
 # logging utils
 kwargs = {'beta': args.beta, 'freebits': freebits}
-best_elbo = (-1e20, 0, 0)
 global_step = 1
 train_agg = Aggregator()
 val_agg = Aggregator()
@@ -172,13 +174,9 @@ logging.getLogger(run_id).info(f'# Total Number of Parameters: {M_parameters:.3f
 print(logging_sep() + f"\nLogging directory: {logdir}\n" + logging_sep())
 
 # init sample
-sample_model(ema.model, likelihood, logdir, writer=valid_writer, global_step=global_step, N=100)
+sample_model(ema.model, likelihood, logdir, global_step=global_step, N=100)
+train(model, likelihood, ema, train_loader, valid_loader, optimizer, scheduler, evaluator, train_agg, val_agg, args.epochs, global_step, logdir="./training_log")
 
-
-
-
-# load best model
-load_model(ema.model, logdir)
 
 # sample model
 sample_model(ema.model, likelihood, logdir, N=100)
@@ -192,6 +190,7 @@ test_logger.info(f"best elbo at step {best_elbo[1]}, epoch {best_elbo[2]}: {best
 test_agg.initialize()
 for x in tqdm(test_loader, desc='iw test epoch'):
     x = x.to(device)
+    
     diagnostics = test_step(x, ema.model, iw_evaluator, **kwargs)
     test_agg.update(diagnostics)
 test_summary = test_agg.data.to('cpu')
