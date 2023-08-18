@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from .freebits import FreeBits
 from ..utils import batch_reduce, log_sum_exp, detach_to_device
 
-from monai.losses.ssim_loss import SSIMLoss
+from monai.losses import SSIMLoss
 
 class VariationalInference(object):
     def __init__(self, likelihood: any, iw_samples: int = 1, auxiliary: Dict[str, float] = {}, **parameters: Any):
@@ -30,7 +30,7 @@ class VariationalInference(object):
         self._auxiliary = auxiliary
         self.likelihood = likelihood
 
-        self.ssim_loss = SSIMLoss(2, reduction="none")
+        self.ssim_loss = SSIMLoss(2)
 
     @staticmethod
     def compute_kls(kls: Union[Tensor, List[Tensor]], freebits: Optional[Union[float, List[float]]], device: str):
@@ -72,16 +72,18 @@ class VariationalInference(object):
         # compute kl: \sum_i E_q(z_i) [ log q(z_i | h) - log p(z_i | h) ]
         kl, kls_loss = self.compute_kls(kls, freebits, x.device)
 
-
         if self.likelihood is None: 
             # approximate elbo via reconstruction loss
-            l1_loss = F.l1_loss(x_, x)
-            rec_loss = self.ssim_loss(x_, x)
-            likelihood = l1_loss + rec_loss
+            l1_loss = F.l1_loss(x_, x, reduction="none")
+            ssim_loss = self.ssim_loss(x_, x)
+                        
+            likelihood = (batch_reduce(l1_loss) + ssim_loss)
+                        
         else:
             # compute E_p(x) [ - log p_\theta(x | z) ]
             nll = - batch_reduce(self.likelihood(logits=x_).log_prob(x))
             likelihood = nll
+            
         # compute total loss and elbo
         loss = likelihood + beta * kls_loss
         elbo = -(likelihood + kl)
