@@ -5,7 +5,6 @@ import torch
 from torch import nn, Tensor
 from torch.distributions import Normal, Dirichlet
 
-
 import torch.functional as F
 
 from ..layers import PaddedNormedConv, NormedDense

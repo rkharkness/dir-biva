@@ -9,26 +9,9 @@ from biva.utils.restore import restore_session
 from booster.utils import logging_sep
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
+import wandb
 
-
-def build_and_save_grid(data, logdir, filename, N=100):
-    nrow = math.floor(math.sqrt(N))
-    grid = make_grid(data, nrow=nrow)
-
-    # normalize
-    grid -= grid.min()
-    grid /= grid.max()
-
-    # save the raw image
-    img = grid.data.permute(1, 2, 0).cpu().numpy()
-    matplotlib.image.imsave(os.path.join(logdir, f"{filename}.png"), img)
-
-    plt.figure(figsize=(8, 8))
-    plt.title(filename.split('/')[-1])
-    plt.imshow(img);
-    plt.axis('off')
-    plt.show()
-
+from biva.utils.logging import build_and_save_grid
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--logdir', default='runs/binmnist-biva-seed42', help='directory containing the training session')

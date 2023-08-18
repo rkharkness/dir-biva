@@ -6,7 +6,57 @@ import numpy as np
 import torch
 from torchvision.utils import make_grid
 import wandb
+import matplotlib.pyplot as plt
+from booster.utils import logging_sep
 
+
+def build_and_save_grid(data, logdir, filename, N=100):
+    nrow = math.floor(math.sqrt(N))
+    grid = make_grid(data, nrow=nrow)
+
+    # normalize
+    grid -= grid.min()
+    grid /= grid.max()
+
+    # save the raw image
+    img = grid.data.permute(1, 2, 0).cpu().numpy()
+    matplotlib.image.imsave(os.path.join(logdir, f"{filename}.png"), img)
+
+    plt.figure(figsize=(8, 8))
+    plt.title(filename.split('/')[-1])
+    plt.imshow(img);
+    plt.axis('off')
+    plt.show()
+
+def visual_eval(x, model, likelihood, logdir):
+    build_and_save_grid(x, logdir, "original")
+
+    # display posterior samples x ~ p(x|z), z ~ q(z|x)
+    x_ = model(x).get('x_')
+
+    if likelihood is not None:
+        x_ = likelihood(logits=x_).sample()
+    
+    build_and_save_grid(x_, logdir, "posterior")
+
+    # dislay prior samples x ~ p(x|z), z ~ p(z)
+    x_ = model.sample_from_prior(100).get('x_')
+    if likelihood is not None:
+        x_ = likelihood(logits=x_).sample()
+        
+    build_and_save_grid(x_, logdir, "prior")
+
+    print(logging_sep("="))
+    print(f"Samples logged in {logdir}")
+    
+        # log to wandb
+    for i in ['original', 'posterior', 'prior']:
+        images = wandb.Image(
+            f"{logdir}/{i}.png", 
+            caption=f"{i} samples"
+            )
+
+        wandb.log({f"val_{i}": images})
 
 def save_img(img, path):
     def _scale(img):
