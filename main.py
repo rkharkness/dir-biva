@@ -1,25 +1,27 @@
 import argparse
 import json
 import logging
+import wandb
 import os
 import pickle
 
 import numpy as np
 import torch
-from biva.datasets import get_binmnist_datasets, get_cifar10_datasets
+from biva.dataloaders import get_dataloaders
+
 from biva.evaluation import VariationalInference
-from biva.model import DeepVae, get_deep_vae_mnist, get_deep_vae_cifar, VaeStage, LvaeStage, BivaStage
+from biva.model import DeepVae, get_deep_vae_mnist, get_deep_vae_cifar, get_deep_vae_brain, get_deep_vae_abdom, VaeStage, LvaeStage, BivaStage
 from biva.utils import LowerBoundedExponentialLR, training_step, test_step, summary2logger, save_model, load_model, \
     sample_model, DiscretizedMixtureLogits
 from booster import Aggregator
 from booster.utils import EMA, logging_sep, available_device
 from torch.distributions import Bernoulli
-from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root', default='runs/', help='directory to store training logs')
+parser.add_argument('--likelihood', action='store_false', help='approx. elbo through reconstruction')
 parser.add_argument('--data_root', default='data/', help='directory to store the dataset')
 parser.add_argument('--dataset', default='binmnist', help='binmnist')
 parser.add_argument('--model_type', default='biva', help='model type (vae | lvae | biva)')
@@ -40,68 +42,78 @@ parser.add_argument('--no_skip', action='store_true', help='do not use skip conn
 parser.add_argument('--log_var_act', default='softplus', type=str, help='activation for the log variance')
 parser.add_argument('--beta', default=1.0, type=float, help='Beta parameter (Beta-VAE)')
 
-opt = parser.parse_args()
+args = parser.parse_args()
 
 # set random seed, set run-id, init log directory and save config
-torch.manual_seed(opt.seed)
-np.random.seed(opt.seed)
-run_id = f"{opt.dataset}-{opt.model_type}-seed{opt.seed}"
-if len(opt.id):
-    run_id += f"-{opt.id}"
-if opt.beta != 1:
-    run_id += f"-{opt.beta}"
-logdir = os.path.join(opt.root, run_id)
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+run_id = f"{args.dataset}-{args.model_type}-seed{args.seed}"
+if len(args.id):
+    run_id += f"-{args.id}"
+if args.beta != 1:
+    run_id += f"-{args.beta}"
+if args.likelihood == False:
+    run_id += 'reconstruction_elbo'
+logdir = os.path.join(args.root, run_id)
 if not os.path.exists(logdir):
     os.makedirs(logdir)
 with open(os.path.join(logdir, 'config.json'), 'w') as fp:
-    fp.write(json.dumps(vars(opt)))
+    fp.write(json.dumps(vars(args)))
 
 # define tensorboard writers
+wandb.init(project="dirbiva2d", entity="rachaelharkness1", notes=run_id)
+
 train_writer = SummaryWriter(os.path.join(logdir, 'train'))
 valid_writer = SummaryWriter(os.path.join(logdir, 'valid'))
 
-# load data
-if opt.dataset == 'binmnist':
-    train_dataset, valid_dataset, test_dataset = get_binmnist_datasets(opt.data_root)
-elif opt.dataset == 'cifar10':
-    from torchvision.transforms import Lambda
-
-    transform = Lambda(lambda x: x * 2 - 1)
-    train_dataset, valid_dataset, test_dataset = get_cifar10_datasets(opt.data_root, transform=transform)
-else:
-    raise NotImplementedError
-
-train_loader = DataLoader(train_dataset, batch_size=opt.bs, shuffle=True, pin_memory=False, num_workers=opt.num_workers)
-valid_loader = DataLoader(valid_dataset, batch_size=2 * opt.bs, shuffle=True, pin_memory=False,
-                          num_workers=opt.num_workers)
-test_loader = DataLoader(test_dataset, batch_size=2 * opt.bs, shuffle=True, pin_memory=False,
-                         num_workers=opt.num_workers)
-tensor_shp = (-1, *train_dataset[0].shape)
+# define training and validation data loaders
+train_loader, valid_loader, test_loader, tensor_shp = get_dataloaders(args.dataset, args.data_root, args.bs, args.num_workers)
 
 # define likelihood
-likelihood = {'cifar10': DiscretizedMixtureLogits(opt.nr_mix), 'binmnist': Bernoulli}[opt.dataset]
+if args.likelihood:
+    likelihood = {'cifar10': DiscretizedMixtureLogits(args.nr_mix), 'binmnist': Bernoulli}[args.dataset]
+else:
+    likelihood = None
 
 # define model
-if 'cifar' in opt.dataset:
+if 'cifar' in args.dataset:
     stages, latents = get_deep_vae_cifar()
-    features_out = 10 * opt.nr_mix
+    if likelihood is None:
+        features_out = 10 * args.nr_mix
+    else:
+        features_out = tensor_shp[1]
+
+elif 'mood' in args.dataset:
+    if 'brain' in args.dataset:
+        stages, latents = get_deep_vae_brain()
+        if likelihood is None:
+            features_out = tensor_shp[1]
+        else:
+            features_out = 10 * args.nr_mix
+
+    if 'abdom' in args.dataset:
+        stages, latents = get_deep_vae_abdom()
+        if likelihood is None:
+            features_out = tensor_shp[1]
+        else:
+            features_out = 10 * args.nr_mix    
 else:
     stages, latents = get_deep_vae_mnist()
     features_out = tensor_shp[1]
 
-Stage = {'vae': VaeStage, 'lvae': LvaeStage, 'biva': BivaStage}[opt.model_type]
-log_var_act = {'none': None, 'softplus': torch.nn.Softplus, 'tanh': torch.nn.Tanh}[opt.log_var_act]
+Stage = {'vae': VaeStage, 'lvae': LvaeStage, 'biva': BivaStage}[args.model_type]
+log_var_act = {'none': None, 'softplus': torch.nn.Softplus, 'tanh': torch.nn.Tanh}[args.log_var_act]
 hyperparameters = {
     'Stage': Stage,
     'tensor_shp': tensor_shp,
     'stages': stages,
     'latents': latents,
     'nonlinearity': 'elu',
-    'q_dropout': opt.q_dropout,
-    'p_dropout': opt.p_dropout,
-    'type': opt.model_type,
+    'q_dropout': args.q_dropout,
+    'p_dropout': args.p_dropout,
+    'type': args.model_type,
     'features_out': features_out,
-    'no_skip': opt.no_skip,
+    'no_skip': args.no_skip,
     'log_var_act': log_var_act
 }
 # save hyper parameters for easy loading
@@ -109,14 +121,14 @@ pickle.dump(hyperparameters, open(os.path.join(logdir, "hyperparameters.p"), "wb
 
 # instantiate the model and move to target device
 model = DeepVae(**hyperparameters)
-device = available_device() if opt.device == 'auto' else opt.device
+device = available_device() if args.device == 'auto' else args.device
 model.to(device)
 
 # define the evaluator
 evaluator = VariationalInference(likelihood, iw_samples=1)
 
 # define evaluation model with Exponential Moving Average
-ema = EMA(model, opt.ema)
+ema = EMA(model, args.ema)
 
 # data dependent init for weight normalization (automatically done during the first forward pass)
 with torch.no_grad():
@@ -134,16 +146,16 @@ print(logging_sep("="))
 
 # define freebits
 n_latents = len(latents)
-if opt.model_type == 'biva':
+if args.model_type == 'biva':
     n_latents = 2 * n_latents - 1
-freebits = [opt.freebits] * n_latents
+freebits = [args.freebits] * n_latents
 
 # optimizer
-optimizer = torch.optim.Adamax(model.parameters(), lr=opt.lr, betas=(0.9, 0.999,))
+optimizer = torch.optim.Adamax(model.parameters(), lr=args.lr, betas=(0.9, 0.999,))
 scheduler = LowerBoundedExponentialLR(optimizer, 0.999999, 0.0001)
 
 # logging utils
-kwargs = {'beta': opt.beta, 'freebits': freebits}
+kwargs = {'beta': args.beta, 'freebits': freebits}
 best_elbo = (-1e20, 0, 0)
 global_step = 1
 train_agg = Aggregator()
@@ -162,40 +174,8 @@ print(logging_sep() + f"\nLogging directory: {logdir}\n" + logging_sep())
 # init sample
 sample_model(ema.model, likelihood, logdir, writer=valid_writer, global_step=global_step, N=100)
 
-# run
-for epoch in range(1, opt.epochs + 1):
 
-    # training
-    train_agg.initialize()
-    for x in tqdm(train_loader, desc='train epoch'):
-        x = x.to(device)
-        diagnostics = training_step(x, model, evaluator, optimizer, scheduler, **kwargs)
-        train_agg.update(diagnostics)
-        ema.update()
-        global_step += 1
-    train_summary = train_agg.data.to('cpu')
 
-    # evaluation
-    val_agg.initialize()
-    for x in tqdm(valid_loader, desc='valid epoch'):
-        x = x.to(device)
-        diagnostics = test_step(x, ema.model, evaluator, **kwargs)
-        val_agg.update(diagnostics)
-    eval_summary = val_agg.data.to('cpu')
-
-    # keep best model
-    best_elbo = save_model(ema.model, eval_summary, global_step, epoch, best_elbo, logdir)
-
-    # logging
-    summary2logger(train_logger, train_summary, global_step, epoch)
-    summary2logger(eval_logger, eval_summary, global_step, epoch, best_elbo)
-
-    # tensorboard logging
-    train_summary.log(train_writer, global_step)
-    eval_summary.log(valid_writer, global_step)
-
-    # sample model
-    sample_model(ema.model, likelihood, logdir, writer=valid_writer, global_step=global_step, N=100)
 
 # load best model
 load_model(ema.model, logdir)
@@ -204,7 +184,7 @@ load_model(ema.model, logdir)
 sample_model(ema.model, likelihood, logdir, N=100)
 
 # final test
-iw_evaluator = VariationalInference(likelihood, iw_samples=opt.iw_samples)
+iw_evaluator = VariationalInference(likelihood, iw_samples=args.iw_samples)
 test_agg = Aggregator()
 test_logger = logging.getLogger('test')
 test_logger.info(f"best elbo at step {best_elbo[1]}, epoch {best_elbo[2]}: {best_elbo[0]:.3f} nats")

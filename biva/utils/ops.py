@@ -2,7 +2,6 @@ from time import time
 
 import torch
 
-
 def append_ellapsed_time(func):
     def wrapper(*args, **kwargs):
         start_time = time()
@@ -11,7 +10,6 @@ def append_ellapsed_time(func):
         return diagnostics
 
     return wrapper
-
 
 @append_ellapsed_time
 def training_step(x, model, evaluator, optimizer, scheduler=None, **kwargs):

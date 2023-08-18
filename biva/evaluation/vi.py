@@ -4,12 +4,14 @@ from typing import *
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from booster import Diagnostic
 from torch import Tensor, nn
 
 from .freebits import FreeBits
 from ..utils import batch_reduce, log_sum_exp, detach_to_device
 
+from monai.losses.ssim_loss import SSIMLoss
 
 class VariationalInference(object):
     def __init__(self, likelihood: any, iw_samples: int = 1, auxiliary: Dict[str, float] = {}, **parameters: Any):
@@ -27,6 +29,8 @@ class VariationalInference(object):
         self._parameters = parameters
         self._auxiliary = auxiliary
         self.likelihood = likelihood
+
+        self.ssim_loss = SSIMLoss(2, reduction="none")
 
     @staticmethod
     def compute_kls(kls: Union[Tensor, List[Tensor]], freebits: Optional[Union[float, List[float]]], device: str):
@@ -65,15 +69,22 @@ class VariationalInference(object):
         x_ = outputs.get('x_')
         kls = outputs.get('kl')
 
-        # compute E_p(x) [ - log p_\theta(x | z) ]
-        nll = - batch_reduce(self.likelihood(logits=x_).log_prob(x))
-
         # compute kl: \sum_i E_q(z_i) [ log q(z_i | h) - log p(z_i | h) ]
         kl, kls_loss = self.compute_kls(kls, freebits, x.device)
 
+
+        if self.likelihood is None: 
+            # approximate elbo via reconstruction loss
+            l1_loss = F.l1_loss(x_, x)
+            rec_loss = self.ssim_loss(x_, x)
+            likelihood = l1_loss + rec_loss
+        else:
+            # compute E_p(x) [ - log p_\theta(x | z) ]
+            nll = - batch_reduce(self.likelihood(logits=x_).log_prob(x))
+            likelihood = nll
         # compute total loss and elbo
-        loss = nll + beta * kls_loss
-        elbo = -(nll + kl)
+        loss = likelihood + beta * kls_loss
+        elbo = -(likelihood + kl)
 
         # compute auxiliary losses / kls
         auxiliary = {}
@@ -92,7 +103,7 @@ class VariationalInference(object):
                 # store as a tuple
                 auxiliary[k] = (weight, value)
 
-        return loss, elbo, kls, kl, nll, auxiliary
+        return loss, elbo, kls, kl, likelihood, auxiliary
 
     def __call__(self, model: nn.Module, x: Tensor, **kwargs: Any) -> Tuple[Tensor, Dict, Dict]:
         """

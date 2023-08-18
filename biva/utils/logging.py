@@ -5,6 +5,7 @@ import matplotlib.image
 import numpy as np
 import torch
 from torchvision.utils import make_grid
+import wandb
 
 
 def save_img(img, path):
@@ -23,10 +24,10 @@ def summary2logger(logger, summary, global_step, epoch, best=None, stats_key='lo
         logger.warning('key ' + str(stats_key) + ' not int output dictionary')
     else:
         message = f'\t[{global_step} / {epoch}]   '
-        message += ''.join([f'{k} {v:6.2f}   ' for k, v in summary.get(stats_key).items()])
+        message += ''.join([f'{k} {v.item():6.2f}   ' for k, v in summary.get(stats_key).items()])
         message += f'({summary["info"]["elapsed-time"]:.2f}s /iter)'
         if best is not None:
-            message += f'   (best: {best[0]:6.2f}  [{best[1]} / {best[2]}])'
+            message += f'   (best: {best[0].item():6.2f}  [{best[1]} / {best[2]}])'
         logger.info(message)
 
 
@@ -50,7 +51,9 @@ def load_model(model, logdir):
 def sample_model(model, likelihood, logdir, global_step=0, writer=None, N=100):
     # sample model
     x_ = model.sample_from_prior(N).get('x_')
-    x_ = likelihood(logits=x_).sample()
+
+    if likelihood is not None:
+        x_ = likelihood(logits=x_).sample()
 
     # make grid
     nrow = math.floor(math.sqrt(N))
@@ -60,10 +63,16 @@ def sample_model(model, likelihood, logdir, global_step=0, writer=None, N=100):
     grid -= grid.min()
     grid /= grid.max()
 
-    # log to tensorboard
-    if writer is not None:
-        writer.add_image('samples', grid, global_step)
-
     # save the raw image
     img = grid.data.permute(1, 2, 0).cpu().numpy()
     matplotlib.image.imsave(os.path.join(logdir, "samples.png"), img)
+
+    # log to wandb
+    if writer is not None:
+        images = wandb.Image(
+            f"{logdir}/samples.png", 
+            caption=f"val recons of best model at global step -{global_step}"
+            )
+    
+        wandb.log({"val_recons": images})
+        writer.add_image('samples', grid, global_step)
