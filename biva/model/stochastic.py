@@ -299,6 +299,8 @@ class DenseDirichlet(StochasticLayer):
                 alpha = self.concentration_from_logits(logits)
 
         # sample layer
+        alpha[alpha != alpha] = self.eps
+
         dist = Dirichlet(alpha)
         z = dist.rsample() if sample else None
 
@@ -306,10 +308,10 @@ class DenseDirichlet(StochasticLayer):
 
     def loss(self, q_data: Dict[str, Any], p_data: Dict[str, Any], **kwargs: Any) -> Dict[str, List]:
         z_q = q_data.get('z')
-        q = q_data.get('dist')
-        p = p_data.get('dist')
+        q = q_data.get('dist').rsample()
+        p = p_data.get('dist').rsample()
 
-        kl = q.log_prob(z_q) - p.log_prob(z_q)
+        kl = F.kl_div(q.log(), p.log(), log_target=True, reduction='none')
         kl = batch_reduce(kl)
 
         return {'kl': [kl]}
@@ -374,7 +376,7 @@ class ConvDirichlet(StochasticLayer):
                 Tensor, Dict[str, Any]]:
 
         if x is None:
-            mu, logvar = self.expand_prior(N)
+            alpha = self.expand_prior(N)
 
         else:
             if inference:
@@ -385,7 +387,19 @@ class ConvDirichlet(StochasticLayer):
                 alpha = self.concentration_from_logits(logits)
 
         # sample layer
-        dist = Normal(alpha)
+        alpha[alpha != alpha] = self.eps
+        
+        dist = Dirichlet(alpha)
         z = dist.rsample() if sample else None
 
         return z, {'z': z, 'dist': dist}
+    
+    def loss(self, q_data: Dict[str, Any], p_data: Dict[str, Any], **kwargs: Any) -> Dict[str, List]:         
+        z_q = q_data.get('z')                
+        q = q_data.get('dist').rsample()
+        p = p_data.get('dist').rsample()
+
+        kl = F.kl_div(q.log(), p.log(), log_target=True, reduction='none')
+        kl = batch_reduce(kl)
+
+        return {'kl': [kl]}
